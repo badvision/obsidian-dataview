@@ -1,7 +1,7 @@
 import { FullIndex } from "data-index";
 import { App, MarkdownRenderChild } from "obsidian";
 import { DataviewSettings } from "settings";
-import { captureViewScroll, restoreViewScroll } from "util/scroll";
+import { beginHeightPreserve, captureViewScroll, restoreViewScroll } from "util/scroll";
 
 /** Generic code for embedded Dataviews. */
 export abstract class DataviewRefreshableRenderer extends MarkdownRenderChild {
@@ -35,7 +35,12 @@ export abstract class DataviewRefreshableRenderer extends MarkdownRenderChild {
             this.lastReload = this.index.revision;
             // Preserve the user's scroll position across the async re-render (obsidian-dataview#2208).
             let captured = captureViewScroll(this.containerEl);
-            this.render().then(() => restoreViewScroll(captured));
+            // Hold the container's height BEFORE render() clears it, so the browser cannot clamp
+            // the view's scroll while the content is collapsed.
+            let guard = beginHeightPreserve(this.containerEl);
+            this.render()
+                .finally(() => guard.release())
+                .then(() => restoreViewScroll(captured, guard.height, this.containerEl.offsetHeight));
         }
     };
 }

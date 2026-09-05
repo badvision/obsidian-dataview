@@ -11,7 +11,7 @@ import { renderMinimalDate, renderMinimalDuration } from "util/normalize";
 import { currentLocale } from "util/locale";
 import { DataArray } from "api/data-array";
 import { extractImageDimensions, isImageEmbed } from "util/media";
-import { captureViewScroll, restoreViewScroll } from "util/scroll";
+import { beginHeightPreserve, captureViewScroll, restoreViewScrollNow } from "util/scroll";
 export type MarkdownProps = { contents: string; sourcePath: string };
 export type MarkdownContext = { component: Component };
 
@@ -261,9 +261,17 @@ export function useIndexBackedState<T>(
             if (lastReload != index.revision && container.isShown() && settings.refreshEnabled) {
                 // Preserve the user's scroll position across the async re-render (obsidian-dataview#2208).
                 const captured = captureViewScroll(container);
+                // Hold the container's height through the rebuild, so the browser cannot clamp
+                // the view's scroll while the content is collapsed.
+                const guard = beginHeightPreserve(container);
                 compute().then(state => {
                     updateState(state);
-                    restoreViewScroll(captured);
+                    // Preact commits after updateState; restore on the frame the new content is
+                    // laid out, then release the guard (it held height >= old until now).
+                    requestAnimationFrame(() => {
+                        restoreViewScrollNow(captured, guard.height, container.offsetHeight);
+                        guard.release();
+                    });
                 });
                 setLastReload(index.revision);
             }
