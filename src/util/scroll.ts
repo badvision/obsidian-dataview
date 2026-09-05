@@ -76,6 +76,8 @@ export function beginHeightPreserve(container: HTMLElement): HeightGuard {
  * are given and they differ by at least 4px: with the height guard in place, the content is
  * already anchored at the user's scroll position, and a stale pixel write would jump the view
  * by the height delta. No-op when there is nothing to restore.
+ *
+ * `heightAfter` must be measured at write time (post-release, post-layout); see `restoreViewScroll`.
  */
 export function restoreViewScrollNow(
     captured: CapturedScroll | null,
@@ -92,9 +94,18 @@ export function restoreViewScrollNow(
  * happens after the re-rendered content is laid out; if the content shrank, the browser clamps
  * to the new maximum. No-op when there is nothing to restore.
  *
- * The optional container heights (before/after the re-render) let the pixel write be skipped
- * when the content's height changed meaningfully; see `restoreViewScrollNow`.
+ * Pass the CONTAINER (not a pre-read height): the post-rebuild height is measured at WRITE TIME,
+ * inside the rAF, i.e. after the height guard has been released and the new content has been
+ * committed and laid out. Reading it at promise resolution (.then() microtask) races the content
+ * insert and mis-fires the delta-skip (the 77px read; #2208, commit 3).
+ * See `restoreViewScrollNow`.
  */
-export function restoreViewScroll(captured: CapturedScroll | null, heightBefore?: number, heightAfter?: number): void {
-    requestAnimationFrame(() => restoreViewScrollNow(captured, heightBefore, heightAfter));
+export function restoreViewScroll(
+    captured: CapturedScroll | null,
+    heightBefore?: number,
+    container?: HTMLElement
+): void {
+    requestAnimationFrame(() =>
+        restoreViewScrollNow(captured, heightBefore, container ? container.offsetHeight : undefined)
+    );
 }

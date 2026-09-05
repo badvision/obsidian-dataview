@@ -266,11 +266,13 @@ export function useIndexBackedState<T>(
                 const guard = beginHeightPreserve(container);
                 compute().then(state => {
                     updateState(state);
-                    // Preact commits after updateState; restore on the frame the new content is
-                    // laid out, then release the guard (it held height >= old until now).
+                    // Preact commits after updateState; on the frame the new content is laid
+                    // out: release the height guard FIRST, then measure the container at write
+                    // time and restore (a pre-release read would see the guard's min-height and
+                    // mis-reason about the delta; #2208, commit 3).
                     requestAnimationFrame(() => {
-                        restoreViewScrollNow(captured, guard.height, container.offsetHeight);
                         guard.release();
+                        restoreViewScrollNow(captured, guard.height, container.offsetHeight);
                     });
                 });
                 setLastReload(index.revision);

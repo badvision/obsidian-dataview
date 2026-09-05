@@ -416,21 +416,27 @@ describe("restoreViewScroll with a height guard", () => {
 
     test("writes the captured pixel when the height delta is under 4px", async () => {
         owner.scrollTop = 0;
+        let container = document.createElement("div");
+        document.body.appendChild(container);
+        Object.defineProperty(container, "offsetHeight", { value: 302, configurable: true });
 
-        restoreViewScroll({ el: owner, top: 150 }, 300, 302);
+        restoreViewScroll({ el: owner, top: 150 }, 300, container);
         await nextFrame();
         expect(owner.scrollTop).toBe(150);
     });
 
     test("skips the pixel write when the height delta is at least 4px", async () => {
         owner.scrollTop = 42; // whatever the content anchoring left the view at
+        let container = document.createElement("div");
+        document.body.appendChild(container);
+        Object.defineProperty(container, "offsetHeight", { value: 304, configurable: true });
 
-        restoreViewScroll({ el: owner, top: 150 }, 300, 304);
+        restoreViewScroll({ el: owner, top: 150 }, 300, container);
         await nextFrame();
         expect(owner.scrollTop).toBe(42); // a stale pixel offset must not jump the view
     });
 
-    test("takes the pixel path when either height is omitted", async () => {
+    test("takes the pixel path when the container is omitted", async () => {
         owner.scrollTop = 0;
 
         restoreViewScroll({ el: owner, top: 80 }, 300, undefined);
@@ -443,6 +449,95 @@ describe("restoreViewScroll with a height guard", () => {
 
         restoreViewScrollNow({ el: owner, top: 150 }, 300, 300);
         expect(owner.scrollTop).toBe(150);
+    });
+});
+
+describe("restoreViewScroll write-time height read (#2208 commit 3)", () => {
+    let owner: HTMLElement;
+    let container: HTMLElement;
+    let height: number;
+    let heightReads = 0;
+    let pending: FrameRequestCallback[] = [];
+    let realRAF: typeof window.requestAnimationFrame;
+
+    beforeEach(() => {
+        owner = document.createElement("div");
+        container = document.createElement("div");
+        document.body.appendChild(owner);
+        document.body.appendChild(container);
+        height = 77; // the pre-commit shell height a .then()-time reader would see
+        heightReads = 0;
+        pending = [];
+        realRAF = window.requestAnimationFrame;
+        // Controllable fake container: the height changes between scheduling and the rAF tick.
+        Object.defineProperty(container, "offsetHeight", {
+            get: () => {
+                heightReads++;
+                return height;
+            },
+            configurable: true,
+        });
+    });
+
+    afterEach(() => {
+        window.requestAnimationFrame = realRAF;
+        document.body.innerHTML = "";
+    });
+
+    function holdRaf(): void {
+        window.requestAnimationFrame = (cb: FrameRequestCallback) => {
+            pending.push(cb);
+            return pending.length;
+        };
+    }
+
+    function fireRaf(): void {
+        for (const cb of pending.splice(0)) cb(16);
+    }
+
+    test("measures the height at WRITE TIME: stale 77px at schedule, 1019 at frame -> pixel write", () => {
+        holdRaf();
+        owner.scrollTop = 0;
+        height = 77;
+
+        restoreViewScroll({ el: owner, top: 434 }, 1019, container);
+
+        // Nothing may be measured at schedule time; the decision happens inside the frame.
+        expect(heightReads).toBe(0);
+        expect(owner.scrollTop).toBe(0);
+
+        // The rebuilt content commits and lays out before the frame: the write-time read sees 1019.
+        height = 1019;
+        fireRaf();
+
+        expect(heightReads).toBeGreaterThanOrEqual(1); // the read happened at write time
+        expect(owner.scrollTop).toBe(434); // |1019 - 1019| < 4 -> the pixel write ran
+    });
+
+    test("skips the write when the WRITE-TIME height differs from the capture by >= 4px", () => {
+        holdRaf();
+        owner.scrollTop = 0;
+        height = 77;
+
+        restoreViewScroll({ el: owner, top: 434 }, 1019, container);
+
+        height = 500; // the rebuilt content is a genuinely different size
+        fireRaf();
+
+        expect(owner.scrollTop).toBe(0); // |500 - 1019| >= 4 -> the pixel write was skipped
+    });
+
+    test("omits the write-time height (pixel path) when no container is passed", () => {
+        holdRaf();
+        owner.scrollTop = 0;
+        height = 77;
+
+        restoreViewScroll({ el: owner, top: 434 }, 1019);
+
+        fireRaf();
+
+        expect(heightReads).toBe(0); // no container, no height read
+        expect(owner.scrollTop).toBe(434);
     });
 });
 
@@ -614,6 +709,50 @@ describe("DataviewRefreshableRenderer height guard", () => {
         // the captured pixel offset must NOT be written.
         expect(viewContent.scrollTop).toBe(0);
     });
+
+    test("a stale .then-time read (1019 -> 77 transient -> 1019 by frame) no longer skips the restore", async () => {
+        let { viewContent, container, workspace, app, index, settings } = setup();
+        let containerHeight = 1019;
+        let minHeightAtReads: string[] = [];
+        Object.defineProperty(container, "offsetHeight", {
+            get: () => {
+                minHeightAtReads.push(container.style.minHeight);
+                return containerHeight;
+            },
+            configurable: true,
+        });
+
+        class TestRenderer extends DataviewRefreshableRenderer {
+            renders = 0;
+            async render() {
+                this.container.innerHTML = "";
+                if (this.renders > 0) containerHeight = 77; // the pre-commit shell, seen by a .then()-time reader
+                this.renders++;
+                await Promise.resolve();
+                this.container.appendChild(document.createElement("div"));
+            }
+        }
+
+        let renderer = new TestRenderer(container, index, app, settings);
+        renderer.onload();
+
+        // Field data (clean run): capture 434, guard holds 1019, the .then() reader saw 77.
+        viewContent.scrollTop = 434;
+        index.revision = 2;
+        workspace.trigger("dataview:refresh-views");
+
+        // The browser clamps the scroll while the content is collapsed.
+        viewContent.scrollTop = 0;
+        await new Promise<void>(resolve => setTimeout(resolve, 0));
+        expect(viewContent.scrollTop).toBe(0);
+
+        // By the frame, the rebuilt content has committed and laid out.
+        containerHeight = 1019;
+        await nextFrame();
+
+        expect(viewContent.scrollTop).toBe(434); // |1019 - 1019| < 4 -> the pixel write ran
+        expect(minHeightAtReads[minHeightAtReads.length - 1]).toBe(""); // the write-time read sees the guard released
+    });
 });
 
 describe("useIndexBackedState (DQL) height guard", () => {
@@ -674,6 +813,65 @@ describe("useIndexBackedState (DQL) height guard", () => {
         await nextFrame();
         expect(viewContent.scrollTop).toBe(900); // same height -> the pixel path ran
         expect(container.style.minHeight).toBe(""); // released after the restore frame
+
+        renderer.onunload();
+    });
+
+    test("releases the height guard before the write-time height read (DQL path)", async () => {
+        let viewContent = document.createElement("div");
+        viewContent.className = "view-content";
+        document.body.appendChild(viewContent);
+        let container = document.createElement("div");
+        viewContent.appendChild(container);
+        let minHeightAtReads: string[] = [];
+        Object.defineProperty(container, "offsetHeight", {
+            get: () => {
+                minHeightAtReads.push(container.style.minHeight);
+                return 240;
+            },
+            configurable: true,
+        });
+        let index = { revision: 1 } as FullIndex;
+        let vault = new Vault();
+        let app = {
+            workspace: {
+                on: vault.on.bind(vault),
+                trigger: vault.trigger.bind(vault),
+                offref: () => {},
+            },
+        } as unknown as App;
+
+        let minHeightDuringCompute: string | null = null;
+        let computed = 0;
+        function DqlView() {
+            let value = useIndexBackedState<string>(container, app, DEFAULT_SETTINGS, index, "", async () => {
+                minHeightDuringCompute = container.style.minHeight; // the guard must be active
+                await Promise.resolve();
+                computed++;
+                return "v" + index.revision;
+            });
+            return h("span", { class: "dql" }, value);
+        }
+
+        let renderer = new ReactRenderer({ app, index, settings: DEFAULT_SETTINGS, container }, h(DqlView, {}));
+        renderer.onload();
+        await new Promise<void>(resolve => setTimeout(resolve, 0));
+        expect(computed).toBe(1);
+
+        // The user scrolls the leaf view, then the index updates.
+        viewContent.scrollTop = 900;
+        index.revision = 2;
+        app.workspace.trigger("dataview:refresh-views");
+
+        viewContent.scrollTop = 0;
+        await new Promise<void>(resolve => setTimeout(resolve, 0));
+        expect(computed).toBe(2);
+        expect(minHeightDuringCompute).toBe("240px"); // the guard was held during the compute
+
+        await nextFrame();
+        expect(viewContent.scrollTop).toBe(900); // same height -> the pixel path ran
+        // The write-time height read (the last read) must see the guard ALREADY released.
+        expect(minHeightAtReads[minHeightAtReads.length - 1]).toBe("");
 
         renderer.onunload();
     });

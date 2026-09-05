@@ -40,7 +40,7 @@ export abstract class DataviewRefreshableRenderer extends MarkdownRenderChild {
             let guard = beginHeightPreserve(this.containerEl);
             this.render()
                 .finally(() => guard.release())
-                .then(() => restoreViewScroll(captured, guard.height, this.containerEl.offsetHeight));
+                .then(() => restoreViewScroll(captured, guard.height, this.containerEl));
         }
     };
 }
