@@ -13,6 +13,7 @@ import {
     captureViewScroll,
     restoreViewScroll,
     restoreViewScrollNow,
+    scheduleSettledRestore,
     CapturedScroll,
 } from "util/scroll";
 
@@ -521,6 +522,209 @@ describe("restoreViewScroll write-time height read (#2208 commit 3)", () => {
     });
 });
 
+describe("scheduleSettledRestore (DOM-only settle window, #2208)", () => {
+    let owner: HTMLElement;
+    let container: HTMLElement;
+    let captured: CapturedScroll;
+    let containerHeight: number;
+
+    /** The scroll listeners the settle windows attached to the owner (in schedule order). */
+    let scrollHandlers: EventListener[];
+
+    /** Drives the scroll-event decision with a fake platform event payload. */
+    function fire(handler: EventListener, isTrusted: boolean): void {
+        // jsdom marks Event.isTrusted non-configurable (and always false), so build a bare
+        // Event-shaped payload: only the isTrusted flag is observable by the window.
+        let e = Object.create(Event.prototype);
+        e.isTrusted = isTrusted;
+        handler(e);
+    }
+
+    /** Advances to T1 (the double rAF after scheduling). */
+    function toT1(): void {
+        jest.advanceTimersByTime(64);
+    }
+
+    beforeEach(() => {
+        jest.useFakeTimers();
+        owner = document.createElement("div");
+        container = document.createElement("div");
+        owner.appendChild(container);
+        document.body.appendChild(owner);
+        containerHeight = 240;
+        Object.defineProperty(container, "offsetHeight", {
+            get: () => containerHeight,
+            configurable: true,
+        });
+        owner.scrollTop = 0; // the browser clamped the scroll while the content was collapsed
+        captured = { el: owner, top: 500 };
+        // Capture the scroll listeners at registration time (typed, no addEventListener spy
+        // casts): the window's decision is driven by calling them directly with fake
+        // `{ isTrusted }` payloads, since jsdom events are always untrusted.
+        scrollHandlers = [];
+        let origAdd = owner.addEventListener;
+        owner.addEventListener = (
+            type: string,
+            listener: EventListenerOrEventListenerObject | null,
+            options?: boolean | AddEventListenerOptions
+        ): void => {
+            if (type === "scroll" && typeof listener === "function") scrollHandlers.push(listener);
+            origAdd.call(owner, type, listener, options);
+        };
+    });
+
+    afterEach(() => {
+        jest.useRealTimers();
+        document.body.innerHTML = "";
+    });
+
+    test("T1: raw pixel write, guard released before the write, window opens on the owner", () => {
+        let guard = beginHeightPreserve(container);
+        expect(container.style.minHeight).toBe("240px");
+
+        scheduleSettledRestore(captured, container, guard);
+        expect(owner.scrollTop).toBe(0); // not before T1
+        expect(scrollHandlers.length).toBe(0);
+
+        toT1();
+
+        expect(container.style.minHeight).toBe(""); // guard released at T1, before the height read
+        expect(owner.scrollTop).toBe(500); // the raw pixel write of captured.top
+        expect(scrollHandlers.length).toBe(1); // the re-assert window is watching the owner
+    });
+
+    test("T1: write-time height delta >= 4px -> the write is skipped and no window opens", () => {
+        let guard = beginHeightPreserve(container);
+        scheduleSettledRestore(captured, container, guard);
+
+        containerHeight = 400; // the rebuilt content is a genuinely different size
+        toT1();
+
+        expect(container.style.minHeight).toBe(""); // the guard is still released at T1
+        expect(owner.scrollTop).toBe(0); // the content anchoring is authoritative
+        expect(scrollHandlers.length).toBe(0);
+    });
+
+    test("untrusted off-target scroll -> re-assert once, target re-measured after the write", () => {
+        let guard = beginHeightPreserve(container);
+        scheduleSettledRestore(captured, container, guard);
+        toT1();
+        expect(owner.scrollTop).toBe(500);
+
+        owner.scrollTop = 999; // a late programmatic overwrite (the keep-caret-visible class)
+        fire(scrollHandlers[0], false);
+
+        expect(owner.scrollTop).toBe(500); // re-written to the captured top
+    });
+
+    test("untrusted on-target scroll (<= 4px) -> no re-assert", () => {
+        let guard = beginHeightPreserve(container);
+        scheduleSettledRestore(captured, container, guard);
+        toT1();
+
+        owner.scrollTop = 503; // within tolerance of the target
+        fire(scrollHandlers[0], false);
+        expect(owner.scrollTop).toBe(503); // the captured-top write did not run
+    });
+
+    test("trusted scroll -> window cancelled (never fight the user)", () => {
+        let guard = beginHeightPreserve(container);
+        scheduleSettledRestore(captured, container, guard);
+        toT1();
+
+        fire(scrollHandlers[0], true);
+        owner.scrollTop = 999;
+        fire(scrollHandlers[0], false); // the window is closed: no re-assert
+        expect(owner.scrollTop).toBe(999);
+    });
+
+    test("cap: at most 3 re-asserts, the 4th off-target event is ignored", () => {
+        let guard = beginHeightPreserve(container);
+        scheduleSettledRestore(captured, container, guard);
+        toT1();
+
+        for (let i = 0; i < 3; i++) {
+            owner.scrollTop = 999;
+            fire(scrollHandlers[0], false);
+            expect(owner.scrollTop).toBe(500);
+        }
+        owner.scrollTop = 999;
+        fire(scrollHandlers[0], false);
+        expect(owner.scrollTop).toBe(999); // the cap: no 4th re-assert
+    });
+
+    test("2s expiry closes the window", () => {
+        let guard = beginHeightPreserve(container);
+        scheduleSettledRestore(captured, container, guard);
+        toT1();
+
+        jest.advanceTimersByTime(2000);
+        owner.scrollTop = 999;
+        fire(scrollHandlers[0], false);
+        expect(owner.scrollTop).toBe(999);
+    });
+
+    test("supersede: a newer schedule on the same container cancels the earlier window", () => {
+        let guard = beginHeightPreserve(container);
+        scheduleSettledRestore(captured, container, guard);
+        toT1();
+        expect(owner.scrollTop).toBe(500);
+        let firstHandler = scrollHandlers[0];
+
+        let captured2 = { el: owner, top: 600 };
+        let guard2 = beginHeightPreserve(container);
+        scheduleSettledRestore(captured2, container, guard2);
+        toT1();
+        expect(owner.scrollTop).toBe(600); // the fresher capture won
+
+        // The first window is dead: its handler must no longer re-assert.
+        owner.scrollTop = 999;
+        fire(firstHandler, false);
+        expect(owner.scrollTop).toBe(999);
+        fire(scrollHandlers[1], false);
+        expect(owner.scrollTop).toBe(600); // only the newest window re-asserts
+    });
+
+    test("supersede before T1: the superseded window's guard is released (no min-height leak)", () => {
+        let guard1 = beginHeightPreserve(container); // guard 1
+        scheduleSettledRestore(captured, container, guard1);
+
+        // The newer refresh fires before T1: guard 2 is refcounted on the same element.
+        let guard2 = beginHeightPreserve(container);
+        expect(container.style.minHeight).toBe("240px");
+        let captured2 = { el: owner, top: 600 };
+        scheduleSettledRestore(captured2, container, guard2); // supersedes window 1 -> releases guard 1
+        expect(container.style.minHeight).toBe("240px"); // guard 2 still holds
+
+        toT1();
+        expect(container.style.minHeight).toBe(""); // released at the newest window's T1
+        expect(owner.scrollTop).toBe(600);
+        expect(scrollHandlers.length).toBe(1); // only the newest window opened
+    });
+
+    test("container detach -> cancel", () => {
+        let guard = beginHeightPreserve(container);
+        scheduleSettledRestore(captured, container, guard);
+        toT1();
+
+        container.remove();
+        owner.scrollTop = 999;
+        fire(scrollHandlers[0], false);
+        expect(owner.scrollTop).toBe(999); // the window cancelled on detach
+    });
+
+    test("no capture (null): guard released at T1, no window", () => {
+        let guard = beginHeightPreserve(container);
+        expect(container.style.minHeight).toBe("240px");
+
+        scheduleSettledRestore(null, container, guard);
+        toT1();
+
+        expect(container.style.minHeight).toBe("");
+        expect(scrollHandlers.length).toBe(0);
+    });
+});
+
 describe("DataviewRefreshableRenderer height guard", () => {
     function setup() {
         let viewContent = document.createElement("div");
@@ -587,11 +791,8 @@ describe("DataviewRefreshableRenderer height guard", () => {
             container.appendChild(el);
             return el;
         };
-        if (typeof (HTMLElement.prototype as unknown as Record<string, unknown>).appendText !== "function") {
-            (HTMLElement.prototype as unknown as Record<string, unknown>).appendText = function (
-                this: HTMLElement,
-                text: string
-            ) {
+        if (typeof HTMLElement.prototype.appendText !== "function") {
+            HTMLElement.prototype.appendText = function (this: HTMLElement, text: string) {
                 this.appendChild(document.createTextNode(text));
                 return this;
             };
@@ -806,6 +1007,98 @@ describe("useIndexBackedState (DQL) height guard", () => {
         expect(viewContent.scrollTop).toBe(900); // same height -> the pixel path ran (T1)
         // The write-time height read (the last read) must see the guard ALREADY released.
         expect(minHeightAtReads[minHeightAtReads.length - 1]).toBe("");
+
+        renderer.onunload();
+    });
+
+    test("releases the guard when the DQL compute rejects: min-height back to the previous value, error propagates, no window", async () => {
+        let viewContent = document.createElement("div");
+        viewContent.className = "view-content";
+        document.body.appendChild(viewContent);
+        let container = document.createElement("div");
+        viewContent.appendChild(container);
+        Object.defineProperty(container, "offsetHeight", { value: 240, configurable: true });
+        // A pre-existing min-height: the release must restore THIS value, not clear the style.
+        container.style.minHeight = "120px";
+        let index = { revision: 1 } as FullIndex;
+        let listeners: Record<string, Array<(e?: unknown) => unknown>> = {};
+        let lastRefresh: unknown = null;
+        let app = {
+            workspace: {
+                on: (name: string, callback: (e?: unknown) => unknown) => {
+                    (listeners[name] ??= []).push(callback);
+                    return {};
+                },
+                // Captures the refresh operation's promise, so the test can observe the
+                // rejection (a swallowed error would leave no rejected promise behind).
+                trigger: (name: string) => {
+                    for (const callback of listeners[name] ?? []) lastRefresh = callback();
+                    return true;
+                },
+                offref: () => {},
+                getLeavesOfType: () => [],
+            },
+        } as unknown as App;
+
+        // The scroll listeners a settle window would attach to the scroll owner.
+        let scrollHandlers: EventListener[] = [];
+        let origAdd = viewContent.addEventListener;
+        viewContent.addEventListener = (
+            type: string,
+            listener: EventListenerOrEventListenerObject | null,
+            options?: boolean | AddEventListenerOptions
+        ): void => {
+            if (type === "scroll" && typeof listener === "function") scrollHandlers.push(listener);
+            origAdd.call(viewContent, type, listener, options);
+        };
+
+        let minHeightDuringCompute: string | null = null;
+        function DqlView() {
+            let value = useIndexBackedState<string>(container, app, DEFAULT_SETTINGS, index, "", async () => {
+                if (index.revision > 1) {
+                    minHeightDuringCompute = container.style.minHeight; // the guard must be active
+                    throw new Error("boom");
+                }
+                await Promise.resolve();
+                return "v" + index.revision;
+            });
+            return h("span", { class: "dql" }, value);
+        }
+
+        let renderer = new ReactRenderer({ app, index, settings: DEFAULT_SETTINGS, container }, h(DqlView, {}));
+        renderer.onload();
+        await new Promise<void>(resolve => setTimeout(resolve, 0));
+        expect(container.querySelector(".dql")?.textContent).toBe("v1");
+
+        // The user scrolls the leaf view, then the index updates: this refresh's compute rejects.
+        viewContent.scrollTop = 900;
+        index.revision = 2;
+        app.workspace.trigger("dataview:refresh-views");
+
+        // Attach the rejection handler SYNCHRONOUSLY: the chain must reject with the original
+        // error, and handling it here keeps the rejection from going unhandled.
+        let seenError: unknown = null;
+        let resolvedUnexpectedly = false;
+        (lastRefresh as Promise<unknown>).then(
+            () => {
+                resolvedUnexpectedly = true;
+            },
+            (e: unknown) => {
+                seenError = e;
+            }
+        );
+
+        await new Promise<void>(resolve => setTimeout(resolve, 0));
+        expect(resolvedUnexpectedly).toBe(false); // the error was not swallowed
+        expect(seenError).toBeInstanceOf(Error);
+        expect((seenError as Error).message).toBe("boom"); // the ORIGINAL error propagated
+        expect(minHeightDuringCompute).toBe("240px"); // the guard was held during the compute
+        expect(container.style.minHeight).toBe("120px"); // released: back to the PREVIOUS value
+        expect(container.querySelector(".dql")?.textContent).toBe("v1"); // the state was not updated
+
+        await nextFrame();
+        await nextFrame();
+        expect(scrollHandlers.length).toBe(0); // no re-assert window was opened
 
         renderer.onunload();
     });

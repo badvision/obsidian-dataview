@@ -67,15 +67,6 @@ export abstract class MarkdownRenderChild extends Component {
     }
 }
 
-/**
- * Minimal stand-in for Obsidian's MarkdownView; only the surface used by EditorView
- * acquisition (#2208, commit 4): the container for the containment match and the already
- * CodeMirror-ified `editor.cm`.
- */
-export class MarkdownView {
-    constructor(public containerEl: HTMLElement, public editor: { cm?: any }) {}
-}
-
 /** Minimal stand-in for Obsidian's markdown renderer (only used asynchronously by the UI). */
 export const MarkdownRenderer = {
     renderMarkdown(_content: string, _el: HTMLElement, _sourcePath: string, _ctx: Component): Promise<void> {
@@ -84,9 +75,10 @@ export const MarkdownRenderer = {
 };
 
 // Obsidian patches these onto HTMLElement; jsdom does not, so provide harmless stand-ins.
-if (typeof (HTMLElement.prototype as any).isShown !== "function") {
-    (HTMLElement.prototype as any).isShown = () => true;
+// (They are declared on the HTMLElement interface in obsidian.d.ts, so no casts are needed.)
+if (typeof HTMLElement.prototype.isShown !== "function") {
+    HTMLElement.prototype.isShown = () => true;
 }
-if (typeof (HTMLElement.prototype as any).onNodeInserted !== "function") {
-    (HTMLElement.prototype as any).onNodeInserted = (_listener: () => any, _once?: boolean) => () => {};
+if (typeof HTMLElement.prototype.onNodeInserted !== "function") {
+    HTMLElement.prototype.onNodeInserted = () => () => {};
 }
