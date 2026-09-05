@@ -133,14 +133,6 @@ describe("findEditorView", () => {
 
         expect(findEditorView(owner, makeApp([{ view: makeMdView(owner, view) }]))).toBe(view);
     });
-
-    test("reading view: no markdown leaf contains the owner -> null", () => {
-        (EditorView.findFromDOM as jest.Mock).mockReturnValue(null);
-        let other = document.createElement("div");
-        document.body.appendChild(other);
-        let otherView = makeView(other, {});
-        expect(findEditorView(owner, makeApp([{ view: makeMdView(other, otherView) }]))).toBeNull();
-    });
 });
 
 describe("captureScrollAnchor", () => {

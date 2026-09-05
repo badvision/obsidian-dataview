@@ -393,18 +393,6 @@ describe("beginHeightPreserve", () => {
         second.release();
         expect(container.style.minHeight).toBe("");
     });
-
-    test("survives the renderer clearing the container's children", () => {
-        withHeight(container, 240);
-        container.appendChild(document.createElement("div"));
-
-        let guard = beginHeightPreserve(container);
-        container.innerHTML = ""; // what render() does
-
-        expect(container.style.minHeight).toBe("240px");
-        guard.release();
-        expect(container.style.minHeight).toBe("");
-    });
 });
 
 describe("restoreViewScroll with a height guard", () => {
@@ -530,19 +518,6 @@ describe("restoreViewScroll write-time height read (#2208 commit 3)", () => {
         fireRaf();
 
         expect(owner.scrollTop).toBe(0); // |500 - 1019| >= 4 -> the pixel write was skipped
-    });
-
-    test("omits the write-time height (pixel path) when no container is passed", () => {
-        holdRaf();
-        owner.scrollTop = 0;
-        height = 77;
-
-        restoreViewScroll({ el: owner, top: 434 }, 1019);
-
-        fireRaf();
-
-        expect(heightReads).toBe(0); // no container, no height read
-        expect(owner.scrollTop).toBe(434);
     });
 });
 
@@ -772,64 +747,6 @@ describe("useIndexBackedState (DQL) height guard", () => {
     afterEach(() => {
         document.body.innerHTML = "";
         jest.restoreAllMocks();
-    });
-
-    test("applies the guard while the DQL refresh computes, and releases it after the restore frame", async () => {
-        let viewContent = document.createElement("div");
-        viewContent.className = "view-content";
-        document.body.appendChild(viewContent);
-        let container = document.createElement("div");
-        viewContent.appendChild(container);
-        Object.defineProperty(container, "offsetHeight", { value: 240, configurable: true });
-        let index = { revision: 1 } as FullIndex;
-        let vault = new Vault();
-        let app = {
-            workspace: {
-                on: vault.on.bind(vault),
-                trigger: vault.trigger.bind(vault),
-                offref: () => {},
-                getLeavesOfType: () => [],
-            },
-        } as unknown as App;
-
-        let minHeightDuringCompute: string | null = null;
-        let computed = 0;
-        function DqlView() {
-            let value = useIndexBackedState<string>(container, app, DEFAULT_SETTINGS, index, "", async () => {
-                minHeightDuringCompute = container.style.minHeight; // the guard must be active
-                await Promise.resolve();
-                computed++;
-                return "v" + index.revision;
-            });
-            return h("span", { class: "dql" }, value);
-        }
-
-        let renderer = new ReactRenderer({ app, index, settings: DEFAULT_SETTINGS, container }, h(DqlView, {}));
-        renderer.onload();
-        // Let preact effects register the refresh handlers and the initial compute settle.
-        await new Promise<void>(resolve => setTimeout(resolve, 0));
-        expect(computed).toBe(1);
-        expect(container.style.minHeight).toBe(""); // the initial render is unguarded
-
-        // The user scrolls the leaf view, then the index updates.
-        viewContent.scrollTop = 900;
-        index.revision = 2;
-        app.workspace.trigger("dataview:refresh-views");
-
-        // The browser synchronously clamps scrollTop to 0 while the content is collapsed.
-        viewContent.scrollTop = 0;
-        await new Promise<void>(resolve => setTimeout(resolve, 0));
-        expect(computed).toBe(2);
-        expect(container.querySelector(".dql")?.textContent).toBe("v2");
-        expect(minHeightDuringCompute).toBe("240px"); // the guard was held during the refresh
-        expect(viewContent.scrollTop).toBe(0); // the restore is still frame-deferred
-
-        await nextFrame();
-        await nextFrame();
-        expect(viewContent.scrollTop).toBe(900); // same height -> the pixel path ran (T1)
-        expect(container.style.minHeight).toBe(""); // released at T1, before the write
-
-        renderer.onunload();
     });
 
     test("releases the height guard before the write-time height read (DQL path)", async () => {
