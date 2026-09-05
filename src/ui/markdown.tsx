@@ -11,7 +11,7 @@ import { renderMinimalDate, renderMinimalDuration } from "util/normalize";
 import { currentLocale } from "util/locale";
 import { DataArray } from "api/data-array";
 import { extractImageDimensions, isImageEmbed } from "util/media";
-import { beginHeightPreserve, captureViewScroll, restoreViewScrollNow } from "util/scroll";
+import { beginHeightPreserve, captureScrollAnchor, scheduleSettledRestore } from "util/scroll";
 export type MarkdownProps = { contents: string; sourcePath: string };
 export type MarkdownContext = { component: Component };
 
@@ -260,20 +260,18 @@ export function useIndexBackedState<T>(
         const refreshOperation = () => {
             if (lastReload != index.revision && container.isShown() && settings.refreshEnabled) {
                 // Preserve the user's scroll position across the async re-render (obsidian-dataview#2208).
-                const captured = captureViewScroll(container);
+                // Capture the CM-owned anchor (or the legacy pixel capture when no view resolves).
+                const anchor = captureScrollAnchor(container, app);
                 // Hold the container's height through the rebuild, so the browser cannot clamp
-                // the view's scroll while the content is collapsed.
+                // the view's scroll while the content is collapsed. The guard is released at T1
+                // (double rAF after the commit) inside scheduleSettledRestore, before the write.
                 const guard = beginHeightPreserve(container);
                 compute().then(state => {
                     updateState(state);
-                    // Preact commits after updateState; on the frame the new content is laid
-                    // out: release the height guard FIRST, then measure the container at write
-                    // time and restore (a pre-release read would see the guard's min-height and
-                    // mis-reason about the delta; #2208, commit 3).
-                    requestAnimationFrame(() => {
-                        guard.release();
-                        restoreViewScrollNow(captured, guard.height, container.offsetHeight);
-                    });
+                    // Preact commits after updateState; scheduleSettledRestore restores on the
+                    // frame the new content is laid out (T1, double rAF) and re-asserts against
+                    // late programmatic scroll overwrites (CM keep-caret-visible; #2208, c4).
+                    scheduleSettledRestore(anchor, guard, container);
                 });
                 setLastReload(index.revision);
             }

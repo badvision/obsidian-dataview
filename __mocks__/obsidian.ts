@@ -67,6 +67,15 @@ export abstract class MarkdownRenderChild extends Component {
     }
 }
 
+/**
+ * Minimal stand-in for Obsidian's MarkdownView; only the surface used by EditorView
+ * acquisition (#2208, commit 4): the container for the containment match and the already
+ * CodeMirror-ified `editor.cm`.
+ */
+export class MarkdownView {
+    constructor(public containerEl: HTMLElement, public editor: { cm?: any }) {}
+}
+
 /** Minimal stand-in for Obsidian's markdown renderer (only used asynchronously by the UI). */
 export const MarkdownRenderer = {
     renderMarkdown(_content: string, _el: HTMLElement, _sourcePath: string, _ctx: Component): Promise<void> {

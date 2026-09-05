@@ -142,7 +142,7 @@ describe("DataviewRefreshableRenderer scroll preservation", () => {
         document.body.appendChild(viewContent);
         let container = document.createElement("div");
         viewContent.appendChild(container);
-        let workspace = new Vault();
+        let workspace = Object.assign(new Vault(), { getLeavesOfType: () => [] });
         let app = { workspace } as unknown as App;
         let index = { revision: 1 } as FullIndex;
         return { viewContent, container, workspace, app, index, settings: DEFAULT_SETTINGS };
@@ -184,7 +184,8 @@ describe("DataviewRefreshableRenderer scroll preservation", () => {
         expect(viewContent.scrollTop).toBe(0); // content rebuilt, but the restore is still deferred
 
         await nextFrame();
-        expect(viewContent.scrollTop).toBe(800);
+        await nextFrame();
+        expect(viewContent.scrollTop).toBe(800); // written at T1 (double rAF)
     });
 
     test("leaves the scroll position alone when the view was not scrolled", async () => {
@@ -229,7 +230,8 @@ describe("DataviewRefreshableRenderer scroll preservation", () => {
         expect(viewContent.scrollTop).toBe(0);
 
         await nextFrame();
-        expect(viewContent.scrollTop).toBe(500);
+        await nextFrame();
+        expect(viewContent.scrollTop).toBe(500); // written at T1 (double rAF)
     });
 
     test("double refresh in flight restores to the user's latest position", async () => {
@@ -261,8 +263,9 @@ describe("DataviewRefreshableRenderer scroll preservation", () => {
         viewContent.scrollTop = 0;
         await new Promise<void>(resolve => setTimeout(resolve, 0));
 
-        // Both deferred restores queue for the same frame (FIFO); the fresher capture lands last.
-        await nextFrame();
+        // The second schedule supersedes the first (same container); both settle at T1
+        // (double rAF after their render resolves); the fresher capture wins.
+        await new Promise<void>(resolve => setTimeout(resolve, 50));
         expect(viewContent.scrollTop).toBe(700);
     });
 });
@@ -286,6 +289,7 @@ describe("useIndexBackedState (DQL) scroll preservation", () => {
                 on: vault.on.bind(vault),
                 trigger: vault.trigger.bind(vault),
                 offref: () => {},
+                getLeavesOfType: () => [],
             },
         } as unknown as App;
 
@@ -319,7 +323,8 @@ describe("useIndexBackedState (DQL) scroll preservation", () => {
         expect(viewContent.scrollTop).toBe(0); // content rebuilt; the restore is still frame-deferred
 
         await nextFrame();
-        expect(viewContent.scrollTop).toBe(900);
+        await nextFrame();
+        expect(viewContent.scrollTop).toBe(900); // written at T1 (double rAF)
 
         renderer.onunload();
     });
@@ -548,7 +553,7 @@ describe("DataviewRefreshableRenderer height guard", () => {
         document.body.appendChild(viewContent);
         let container = document.createElement("div");
         viewContent.appendChild(container);
-        let workspace = new Vault();
+        let workspace = Object.assign(new Vault(), { getLeavesOfType: () => [] });
         let app = { workspace } as unknown as App;
         let index = { revision: 1 } as FullIndex;
         return { viewContent, container, workspace, app, index, settings: DEFAULT_SETTINGS };
@@ -587,9 +592,11 @@ describe("DataviewRefreshableRenderer height guard", () => {
         viewContent.scrollTop = 0;
         await Promise.resolve();
         await Promise.resolve();
-        expect(container.style.minHeight).toBe(""); // released once render() resolved
+        expect(container.style.minHeight).toBe("240px"); // still held until T1
 
         await nextFrame();
+        await nextFrame();
+        expect(container.style.minHeight).toBe(""); // released at T1, before the write
         expect(viewContent.scrollTop).toBe(300); // same height -> the pixel path ran
     });
 
@@ -629,15 +636,17 @@ describe("DataviewRefreshableRenderer height guard", () => {
         workspace.trigger("dataview:refresh-views");
 
         // render() swallows the eval error (renders the error pre) and resolves; the guard
-        // must have been released on that path too.
+        // is held until T1 and released on that path too.
         await Promise.resolve();
         await Promise.resolve();
         await Promise.resolve();
         expect(container.innerHTML).toContain("Evaluation Error");
-        expect(container.style.minHeight).toBe("");
+        expect(container.style.minHeight).toBe("240px"); // still held until T1
         expect(asyncEvalInContext).toHaveBeenCalledTimes(2);
 
         await nextFrame();
+        await nextFrame();
+        expect(container.style.minHeight).toBe(""); // released at T1
         expect(viewContent.scrollTop).toBe(500);
     });
 
@@ -670,11 +679,12 @@ describe("DataviewRefreshableRenderer height guard", () => {
         // Both refreshes are in flight; the guard is refcounted and stays applied.
         expect(container.style.minHeight).toBe("240px");
 
-        await new Promise<void>(resolve => setTimeout(resolve, 30));
+        // Both windows settle at T1 (double rAF after each render resolves); the second
+        // supersedes the first, and the guard is released only after the LAST one releases.
+        await new Promise<void>(resolve => setTimeout(resolve, 50));
         expect(container.style.minHeight).toBe(""); // released only after the LAST refresh
 
-        await nextFrame();
-        expect(viewContent.scrollTop).toBe(700); // the fresher capture lands last
+        expect(viewContent.scrollTop).toBe(700); // the fresher capture won
     });
 
     test("skips the stale pixel write when the rebuilt content changes height", async () => {
@@ -702,9 +712,11 @@ describe("DataviewRefreshableRenderer height guard", () => {
         viewContent.scrollTop = 0;
         await Promise.resolve();
         await Promise.resolve();
-        expect(container.style.minHeight).toBe(""); // guard released on resolve
+        expect(container.style.minHeight).toBe("240px"); // guard held until T1
 
         await nextFrame();
+        await nextFrame();
+        expect(container.style.minHeight).toBe(""); // released at T1
         // The height changed by more than 4px, so the content anchoring is authoritative and
         // the captured pixel offset must NOT be written.
         expect(viewContent.scrollTop).toBe(0);
@@ -749,6 +761,7 @@ describe("DataviewRefreshableRenderer height guard", () => {
         // By the frame, the rebuilt content has committed and laid out.
         containerHeight = 1019;
         await nextFrame();
+        await nextFrame();
 
         expect(viewContent.scrollTop).toBe(434); // |1019 - 1019| < 4 -> the pixel write ran
         expect(minHeightAtReads[minHeightAtReads.length - 1]).toBe(""); // the write-time read sees the guard released
@@ -775,6 +788,7 @@ describe("useIndexBackedState (DQL) height guard", () => {
                 on: vault.on.bind(vault),
                 trigger: vault.trigger.bind(vault),
                 offref: () => {},
+                getLeavesOfType: () => [],
             },
         } as unknown as App;
 
@@ -811,8 +825,9 @@ describe("useIndexBackedState (DQL) height guard", () => {
         expect(viewContent.scrollTop).toBe(0); // the restore is still frame-deferred
 
         await nextFrame();
-        expect(viewContent.scrollTop).toBe(900); // same height -> the pixel path ran
-        expect(container.style.minHeight).toBe(""); // released after the restore frame
+        await nextFrame();
+        expect(viewContent.scrollTop).toBe(900); // same height -> the pixel path ran (T1)
+        expect(container.style.minHeight).toBe(""); // released at T1, before the write
 
         renderer.onunload();
     });
@@ -838,6 +853,7 @@ describe("useIndexBackedState (DQL) height guard", () => {
                 on: vault.on.bind(vault),
                 trigger: vault.trigger.bind(vault),
                 offref: () => {},
+                getLeavesOfType: () => [],
             },
         } as unknown as App;
 
@@ -869,7 +885,8 @@ describe("useIndexBackedState (DQL) height guard", () => {
         expect(minHeightDuringCompute).toBe("240px"); // the guard was held during the compute
 
         await nextFrame();
-        expect(viewContent.scrollTop).toBe(900); // same height -> the pixel path ran
+        await nextFrame();
+        expect(viewContent.scrollTop).toBe(900); // same height -> the pixel path ran (T1)
         // The write-time height read (the last read) must see the guard ALREADY released.
         expect(minHeightAtReads[minHeightAtReads.length - 1]).toBe("");
 
