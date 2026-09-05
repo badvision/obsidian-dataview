@@ -57,4 +57,27 @@ export class Vault extends EventEmitter {
 
 export class Component {
     registerEvent() {}
+    register() {}
+}
+
+/** Stand-in for Obsidian's `MarkdownRenderChild`; retains the element whose DOM it manages. */
+export abstract class MarkdownRenderChild extends Component {
+    constructor(public containerEl: HTMLElement) {
+        super();
+    }
+}
+
+/** Minimal stand-in for Obsidian's markdown renderer (only used asynchronously by the UI). */
+export const MarkdownRenderer = {
+    renderMarkdown(_content: string, _el: HTMLElement, _sourcePath: string, _ctx: Component): Promise<void> {
+        return Promise.resolve();
+    },
+};
+
+// Obsidian patches these onto HTMLElement; jsdom does not, so provide harmless stand-ins.
+if (typeof (HTMLElement.prototype as any).isShown !== "function") {
+    (HTMLElement.prototype as any).isShown = () => true;
+}
+if (typeof (HTMLElement.prototype as any).onNodeInserted !== "function") {
+    (HTMLElement.prototype as any).onNodeInserted = (_listener: () => any, _once?: boolean) => () => {};
 }

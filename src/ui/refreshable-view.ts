@@ -1,6 +1,7 @@
 import { FullIndex } from "data-index";
 import { App, MarkdownRenderChild } from "obsidian";
 import { DataviewSettings } from "settings";
+import { captureViewScroll, restoreViewScroll } from "util/scroll";
 
 /** Generic code for embedded Dataviews. */
 export abstract class DataviewRefreshableRenderer extends MarkdownRenderChild {
@@ -32,7 +33,9 @@ export abstract class DataviewRefreshableRenderer extends MarkdownRenderChild {
         // But only if we're mounted in the DOM and auto-refreshing is active.
         if (this.lastReload != this.index.revision && this.container.isShown() && this.settings.refreshEnabled) {
             this.lastReload = this.index.revision;
-            this.render();
+            // Preserve the user's scroll position across the async re-render (obsidian-dataview#2208).
+            let captured = captureViewScroll(this.containerEl);
+            this.render().then(() => restoreViewScroll(captured));
         }
     };
 }
